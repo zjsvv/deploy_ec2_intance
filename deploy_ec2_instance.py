@@ -1,27 +1,25 @@
 import boto3
 import configparser
 import json
-import logging
 import os
 import stat
 import yaml
 
 from botocore.config import Config
 from botocore.exceptions import ClientError
-
-
-logger = logging.getLogger(__name__)
+from cryptography.hazmat.primitives import serialization as crypto_serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend as crypto_default_backend
 
 config = configparser.ConfigParser()
 config.read(os.path.join(os.path.dirname(__file__), '.config'))
 
-"""
-load_yaml -> create_key_pair -> get_lastest_ami_id -> create_key_pair -> create_security_group
-
--> create policy -> create IAM role
--> create_instance -> ssh-keygen on instance
-
-"""
+ec2 = boto3.resource(
+    "ec2",
+    region_name=config['AWS']['REGION'],
+    aws_access_key_id=config['AWS']['ACCESS_KEY_ID'],
+    aws_secret_access_key=config['AWS']['SECRET_ACCESS_KEY']
+)
 
 ec2_client = boto3.client(
     "ec2",
@@ -44,6 +42,14 @@ iam_client = boto3.client(
     aws_secret_access_key=config['AWS']['SECRET_ACCESS_KEY']
 )
 
+def execute_commands_on_linux_instances(client, commands, instance_ids):
+    response = client.send_command(
+        DocumentName="AWS-RunShellScript",
+        Parameters={'commands': commands},
+        InstanceIds=instance_ids,
+    )
+    return response
+
 def load_yaml():
     with open(os.path.join(os.path.dirname(__file__)) + 'source.yaml') as f:
         data = yaml.safe_load(f)
@@ -58,7 +64,7 @@ def get_lastest_ami_id():
         response = ssm_client.get_parameter(Name=ami_name, WithDecryption=True)
     except ClientError as e:
         if e.response['Error']['Code'] == 'ParameterNotFound':
-            logger.warning('Parameter Not Found. Try a new one.')
+            print('Parameter Not Found. Try a new one.')
             return
         else:
             raise e
@@ -90,8 +96,23 @@ def get_or_create_key_pair():
 
     return response['KeyName']
 
+def get_public_key(private_key_pem_file_name):
+    with open(os.path.join(os.path.dirname(__file__)) + private_key_pem_file_name + '.pem', "rb") as key_file:
+        private_key = crypto_serialization.load_pem_private_key(
+            key_file.read(),
+            password=None,
+        )
+
+    public_key = private_key.public_key()
+    pem = public_key.public_bytes(
+        encoding=crypto_serialization.Encoding.OpenSSH,
+        format=crypto_serialization.PublicFormat.OpenSSH
+    )
+
+    return pem.decode('utf-8')
+
 def get_or_create_security_group():
-    sg_name = 'ec2_SSH'
+    sg_name = f"{settings['server']['name']}-EC2-SSH"
 
     for sg in ec2_client.describe_security_groups()['SecurityGroups']:
         if sg['GroupName'] == sg_name:
@@ -126,12 +147,16 @@ def get_or_create_security_group():
 
 def get_or_create_instance_profile():
     inst_profile_name = f"{settings['server']['name']}-EC2-Instance-Profile"
+    role_name = f"{settings['server']['name']}-EC2-SSMAcess"
 
     try:
         response = iam_client.get_instance_profile(InstanceProfileName=inst_profile_name)
         return response['InstanceProfile']['Arn']
-    except ClientError as e:
-        pass
+    except iam_client.exceptions.NoSuchEntityException:
+        print(f"Instance profile({inst_profile_name}) does not exists. Creating new one...")
+    except Exception as e:
+        print("Unexpected error: %s" % e)
+        raise e
 
     # create role
     arpd = {
@@ -147,15 +172,22 @@ def get_or_create_instance_profile():
         ]
     }
 
-    response = iam_client.create_role(
-        RoleName=f"{settings['server']['name']}_EC2SSMAcess",
-        AssumeRolePolicyDocument=json.dumps(arpd),
-        Description='Allows EC2 instances to call AWS services on your behalf.'
-    )
+    try:
+        response = iam_client.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(arpd),
+            Description='Allows EC2 instances to call AWS services on your behalf.'
+        )
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'EntityAlreadyExists':
+            print(f"Role({role_name}) already exists")
+        else:
+            print("Unexpected error: %s" % e)
+            raise e
 
     # attach policy to role
     response = iam_client.attach_role_policy(
-        RoleName=f"{settings['server']['name']}_EC2SSMAcess",
+        RoleName=role_name,
         PolicyArn='arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
     )
 
@@ -164,12 +196,11 @@ def get_or_create_instance_profile():
         InstanceProfileName=inst_profile_name
     )
     arn = response['InstanceProfile']['Arn']
-    name = response['InstanceProfile']['InstanceProfileName']
 
     # add role to instance profile
     response = iam_client.add_role_to_instance_profile(
         InstanceProfileName=inst_profile_name,
-        RoleName=f"{settings['server']['name']}_EC2SSMAcess"
+        RoleName=role_name
     )
     return arn
 
@@ -210,58 +241,47 @@ def create_instance():
             InstanceType=f"{settings['server']['instance_type']}"
         )
     except ClientError as e:
+        print("Unexpected error: %s" % e)
         raise e
 
-    instance_id = response['Instances'][0]['InstanceId']
+    instance = ec2.Instance(response['Instances'][0]['InstanceId'])
 
-    print(f'Waiting for instance {instance_id} to switch to running state.')
+    print(f'Waiting for instance {instance.id} to switch to running state.')
     waiter = ec2_client.get_waiter('instance_running')
-    waiter.wait(InstanceIds=[instance_id])
-    print(f'Instance {instance_id} is running.')
+    waiter.wait(InstanceIds=[instance.id])
+    print(f'...Instance {instance.id} is running.')
 
-    # commands = ['echo "hello world"']
-    # response = ssm_lient.send_command(
-    #     DocumentName="AWS-RunShellScript",
-    #     Parameters={'commands': commands},
-    #     InstanceIds=[instance_id],
-    # )
+    print(f'Waiting for instance {instance.id} to be status ok.')
+    waiter = ec2_client.get_waiter('instance_status_ok')
+    waiter.wait(InstanceIds=[instance.id])
+    print(f'...Instance {instance.id} is status ok.')
 
-# create_instance()
-
-def execute_commands_on_linux_instances(client, commands, instance_ids):
-    """Runs commands on remote linux instances
-    :param client: a boto/boto3 ssm client
-    :param commands: a list of strings, each one a command to execute on the instances
-    :param instance_ids: a list of instance_id strings, of the instances on which to execute the command
-    :return: the response from the send_command function (check the boto3 docs for ssm client.send_command() )
-    """
-
-    resp = client.send_command(
-        DocumentName="AWS-RunShellScript",
-        Parameters={'commands': commands},
-        InstanceIds=instance_ids,
-    )
-    return resp
-
-def test():
-    a = 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCztHqaZydaetBJGowKhPDpc0ewmUHjiDlHYSwj7v2yFfad+SzvBU0bFAmfSjkVftT9rSPUyl5JMEVYGGXCadRRfH35Sy99pDYSOup6m1Y+y+SYLhuIN6SLbN//059gunE/p6hhWVsV785gwL69embmp5FDXvzUY2yB0c+08xPNLZ0kCFR4arte6s6m1ZukB2379yQHueCTQ8lt1WbuGxRjrpC0LvZBfl4OGcDVaMkjjQfAUidwMHn7X0CqdPOx7pjXOAKVWWr2dLzyqHd1sVtmjydYyw2tTr+9c7SycFZZYf1tn0VvQnHJhgrqnSSlDEwrfKRo9/NBFxbb8qMEgf6f'
+    print(f'Make a file system on /dev/xvdf and mount it on /data')
     commands = [
-        'sudo adduser -m user3',
-        'sudo su - user3',
-        'cd ~/',
-        'mkdir .ssh',
-        'chmod 700 .ssh',
-        f"echo {a} >> .ssh/authorized_keys",
-        'chmod 600 .ssh/authorized_keys',
-     ]
+        'sudo mkfs -t xfs /dev/xvdf',
+        'sudo mkdir /data',
+        'sudo mount /dev/xvdf /data'
+        ]
 
-    ssm_document = "AWS-RunShellScript"
-    # params = {"commands": ["#!/bin/bash\necho 'hello world'"]}
-    params = {"commands": commands}
-    response = ssm_client.send_command(
-        DocumentName=ssm_document,
-        Parameters=params,
-        InstanceIds=['i-08ad420951b416280'],
-    )
+    response = execute_commands_on_linux_instances(ssm_client, commands, [instance.id])
+    print('...done')
 
-test()
+    print('creating users and setting up public key...')
+    public_key_str = get_public_key(key_name)
+    for user in settings['server']['users']:
+        user_name = user['login']
+
+        commands = [
+            f"sudo adduser {user_name}",
+            f"sudo su - {user_name} -c 'mkdir .ssh'",
+            f"sudo su - {user_name} -c 'chmod 700 .ssh'",
+            f"sudo su - {user_name} -c 'echo {public_key_str} >> .ssh/authorized_keys'",
+            f"sudo su - {user_name} -c 'chmod 600 .ssh/authorized_keys'"
+        ]
+
+        response = execute_commands_on_linux_instances(ssm_client, commands, [instance.id])
+        print(f'Connect with SSH:')
+        print(f'$ ssh -i "{key_name}.pem" {user_name}@{instance.public_dns_name}')
+    print(f'crete {user_name} ...done')
+
+create_instance()

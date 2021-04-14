@@ -1,3 +1,13 @@
+## Create an IAM user on AWS with following existing policies
+```
+AmazonEC2FullAccess
+AmazonEC2RoleforSSM
+IAMFullAccess
+AWSResourceGroupsReadOnlyAccess
+AmazonSSMFullAccess
+IAMUserSSHKeys
+```
+
 ## How to setup local environment
 1. Installing virtualenv
     ```
@@ -25,14 +35,19 @@
     $ source env/bin/activate
     ```
 
-4. Install required packages
+5. Install required packages
     ```
     $ pip install -r requirements.txt
     ```
+## Setup AWS config and credentials for boto3
+1. modify `.config`
+    ```
+    ACCESS_KEY_ID=YOUR_KEY
+    SECRET_ACCESS_KEY=YOUR_SECRET
+    ```
 
-## setup aws config and credentials for boto3
-1. ~/.aws/credentials
-    ```
-    aws_access_key_id = YOUR_KEY
-    aws_secret_access_key = YOUR_SECRET
-    ```
+## How to deploy
+
+```
+$ bash deploy.sh
+```
