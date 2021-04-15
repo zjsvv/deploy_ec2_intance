@@ -8,6 +8,14 @@ AmazonSSMFullAccess
 IAMUserSSHKeys
 ```
 
+## Setup AWS config and credentials for boto3
+1. modify `.config`
+    ```
+    REGION=REGION_YOU_WANT
+    ACCESS_KEY_ID=YOUR_KEY
+    SECRET_ACCESS_KEY=YOUR_SECRET
+    ```
+
 ## How to setup local environment
 1. Installing virtualenv
     ```
@@ -16,7 +24,7 @@ IAMUserSSHKeys
 
 2. Clone the repository
     ```
-    $ git clone .git
+    $ git clone git@github.com:zjsvv/deploy_ec2_intance.git
     ```
 
 3. Go inside the project directory
@@ -39,15 +47,8 @@ IAMUserSSHKeys
     ```
     $ pip install -r requirements.txt
     ```
-## Setup AWS config and credentials for boto3
-1. modify `.config`
-    ```
-    ACCESS_KEY_ID=YOUR_KEY
-    SECRET_ACCESS_KEY=YOUR_SECRET
-    ```
 
-## How to deploy
-
+## How to use
 ```
 $ bash deploy.sh
 ```

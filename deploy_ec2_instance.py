@@ -96,7 +96,7 @@ def get_or_create_key_pair():
 
     return response['KeyName']
 
-def get_public_key(private_key_pem_file_name):
+def generate_public_key(private_key_pem_file_name):
     with open(os.path.join(os.path.dirname(__file__)) + private_key_pem_file_name + '.pem', "rb") as key_file:
         private_key = crypto_serialization.load_pem_private_key(
             key_file.read(),
@@ -204,36 +204,35 @@ def get_or_create_instance_profile():
     )
     return arn
 
+def get_block_device_mapping():
+    blkdevmappings = []
+    i = 0
+    for volume in settings['server']['volumes']:
+        d = {
+            'DeviceName': volume['device'],
+            'VirtualName': f'ephemeral{i}',
+            'Ebs': {
+                'VolumeSize': volume['size_gb'],
+                'VolumeType': 'standard'
+            },
+        }
+        blkdevmappings.append(d)
+        i += 1
+
+    return blkdevmappings
+
 def create_instance():
     image_id = get_lastest_ami_id()
     key_name = get_or_create_key_pair()
     sg_name = get_or_create_security_group()
     ip_arn = get_or_create_instance_profile()
+    blkdevmappings = get_block_device_mapping()
 
     try:
         response = ec2_client.run_instances(
-            BlockDeviceMappings=[
-                {
-                    'DeviceName': '/dev/xvda',
-                    'VirtualName': 'ephemeral0',
-                    'Ebs': {
-                        'VolumeSize': 10,
-                        'VolumeType': 'standard'
-                    },
-                },
-                {
-                    'DeviceName': '/dev/xvdf',
-                    'VirtualName': 'ephemeral1',
-                    'Ebs': {
-                        'VolumeSize': 100,
-                        'VolumeType': 'standard'
-                    },
-                },
-            ],
+            BlockDeviceMappings=blkdevmappings,
             SecurityGroups=[sg_name],
-            IamInstanceProfile={
-                'Arn': ip_arn,
-            },
+            IamInstanceProfile={'Arn': ip_arn},
             ImageId=image_id,
             KeyName=key_name,
             MinCount=settings['server']['min_count'],
@@ -256,18 +255,20 @@ def create_instance():
     waiter.wait(InstanceIds=[instance.id])
     print(f'...Instance {instance.id} is status ok.')
 
-    print(f'Make a file system on /dev/xvdf and mount it on /data')
-    commands = [
-        'sudo mkfs -t xfs /dev/xvdf',
-        'sudo mkdir /data',
-        'sudo mount /dev/xvdf /data'
-        ]
-
-    response = execute_commands_on_linux_instances(ssm_client, commands, [instance.id])
-    print('...done')
+    if len(settings['server']['volumes']) > 0:
+        print(f'Make file system on volume')
+        for volume in settings['server']['volumes'][1:]:
+            commands = [
+                f"sudo mkfs -t {volume['type']} {volume['device']}",
+                f"sudo mkdir {volume['mount']}",
+                f"sudo mount {volume['device']} {volume['mount']}",
+                f"sudo chmod -R 777 {volume['mount']}"
+            ]
+            response = execute_commands_on_linux_instances(ssm_client, commands, [instance.id])
+        print('...done')
 
     print('creating users and setting up public key...')
-    public_key_str = get_public_key(key_name)
+    public_key_str = generate_public_key(key_name)
     for user in settings['server']['users']:
         user_name = user['login']
 
