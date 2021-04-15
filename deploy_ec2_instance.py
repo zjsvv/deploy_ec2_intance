@@ -3,6 +3,7 @@ import configparser
 import json
 import os
 import stat
+import time
 import yaml
 
 from botocore.config import Config
@@ -192,6 +193,9 @@ def get_or_create_instance_profile():
         WaiterConfig={'Delay': 10}
     )
 
+    # just in case Role is still not available
+    time.sleep(10)
+
     # attach policy to role
     response = iam_client.attach_role_policy(
         RoleName=role_name,
@@ -209,6 +213,9 @@ def get_or_create_instance_profile():
         InstanceProfileName=inst_profile_name,
         WaiterConfig={'Delay': 10}
     )
+
+    # just in case instance profile is still not available
+    time.sleep(10)
 
     # add role to instance profile
     response = iam_client.add_role_to_instance_profile(
@@ -271,7 +278,7 @@ def create_instance():
     print(f'...Instance {instance.id} is status ok.')
 
     if len(settings['server']['volumes']) > 0:
-        print(f"Make file system on volume {volume['device']}")
+        print('Make file system on volume')
         for volume in settings['server']['volumes'][1:]:
             commands = [
                 f"sudo mkfs -t {volume['type']} {volume['device']}",
