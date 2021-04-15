@@ -151,7 +151,7 @@ def get_or_create_instance_profile():
 
     try:
         response = iam_client.get_instance_profile(InstanceProfileName=inst_profile_name)
-        return response['InstanceProfile']['Arn']
+        return inst_profile_name
     except iam_client.exceptions.NoSuchEntityException:
         print(f"Instance profile({inst_profile_name}) does not exists. Creating new one...")
     except Exception as e:
@@ -185,6 +185,13 @@ def get_or_create_instance_profile():
             print("Unexpected error: %s" % e)
             raise e
 
+    # make sure role exists
+    waiter = iam_client.get_waiter('role_exists')
+    waiter.wait(
+        RoleName=role_name,
+        WaiterConfig={'Delay': 10}
+    )
+
     # attach policy to role
     response = iam_client.attach_role_policy(
         RoleName=role_name,
@@ -195,14 +202,20 @@ def get_or_create_instance_profile():
     response = iam_client.create_instance_profile(
         InstanceProfileName=inst_profile_name
     )
-    arn = response['InstanceProfile']['Arn']
+
+    # make sure instance profile exists
+    waiter = iam_client.get_waiter('instance_profile_exists')
+    waiter.wait(
+        InstanceProfileName=inst_profile_name,
+        WaiterConfig={'Delay': 10}
+    )
 
     # add role to instance profile
     response = iam_client.add_role_to_instance_profile(
         InstanceProfileName=inst_profile_name,
         RoleName=role_name
     )
-    return arn
+    return inst_profile_name
 
 def get_block_device_mapping():
     blkdevmappings = []
@@ -225,14 +238,16 @@ def create_instance():
     image_id = get_lastest_ami_id()
     key_name = get_or_create_key_pair()
     sg_name = get_or_create_security_group()
-    ip_arn = get_or_create_instance_profile()
+    ip_name = get_or_create_instance_profile()
     blkdevmappings = get_block_device_mapping()
 
     try:
         response = ec2_client.run_instances(
             BlockDeviceMappings=blkdevmappings,
             SecurityGroups=[sg_name],
-            IamInstanceProfile={'Arn': ip_arn},
+            IamInstanceProfile={
+                'Name': ip_name
+                },
             ImageId=image_id,
             KeyName=key_name,
             MinCount=settings['server']['min_count'],
@@ -256,7 +271,7 @@ def create_instance():
     print(f'...Instance {instance.id} is status ok.')
 
     if len(settings['server']['volumes']) > 0:
-        print(f'Make file system on volume')
+        print(f"Make file system on volume {volume['device']}")
         for volume in settings['server']['volumes'][1:]:
             commands = [
                 f"sudo mkfs -t {volume['type']} {volume['device']}",
@@ -279,7 +294,6 @@ def create_instance():
             f"sudo su - {user_name} -c 'echo {public_key_str} >> .ssh/authorized_keys'",
             f"sudo su - {user_name} -c 'chmod 600 .ssh/authorized_keys'"
         ]
-
         response = execute_commands_on_linux_instances(ssm_client, commands, [instance.id])
         print(f'Connect with SSH:')
         print(f'$ ssh -i "{key_name}.pem" {user_name}@{instance.public_dns_name}')
