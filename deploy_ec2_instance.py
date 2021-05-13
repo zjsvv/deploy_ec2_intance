@@ -304,6 +304,6 @@ def create_instance():
         response = execute_commands_on_linux_instances(ssm_client, commands, [instance.id])
         print(f'Connect with SSH:')
         print(f'$ ssh -i "{key_name}.pem" {user_name}@{instance.public_dns_name}')
-    print(f'crete {user_name} ...done')
+        print(f'crete {user_name} ...done')
 
 create_instance()
