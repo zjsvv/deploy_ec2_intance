@@ -1,3 +1,8 @@
+## This repo can let you
+1. Deploy an EC2 instance (customized by source.yaml)
+2. SSH into the instance as users specified in source.yaml
+3. Read from and write to each of two volumes for each user
+
 ## Create an IAM user on AWS with following existing policies
 ```
 AmazonEC2FullAccess
